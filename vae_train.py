@@ -20,6 +20,10 @@ class ObsDataset(Dataset):
         return self.data[idx]
 
 
+def kl_anneal_function(epoch, max_epochs):
+    return min(1, epoch / ((2 / 3) * max_epochs))
+
+
 LATENT_DIMS = 32
 BATCH_SIZE = 128
 LR = 1e-4
@@ -70,6 +74,7 @@ def train(autoencoder, data, epochs=20):
     opt = torch.optim.Adam(autoencoder.parameters(), lr=LR)
     with tqdm(range(epochs)) as t:
         for epoch in t:
+            kl_weight = kl_anneal_function(epoch, epochs)
             for b_idx, x in enumerate(data):
                 x = x.to(device)
                 x = x.permute(0, 3, 1, 2)  # Get channels to be first dimension
@@ -78,7 +83,7 @@ def train(autoencoder, data, epochs=20):
 
                 recon_loss = ((x - x_hat) ** 2).mean() 
                 # tuning this beta so they're roughly equal losses to begin with?
-                kl_loss = 0.005 * autoencoder.encoder.kl / x.shape[0]
+                kl_loss = kl_weight * autoencoder.encoder.kl / x.shape[0]
                 loss = recon_loss + kl_loss
                 # print(((x - x_hat) ** 2).sum(), autoencoder.encoder.kl)
                 # print(f'epoch {epoch} | loss {loss:.2f}')
@@ -88,9 +93,6 @@ def train(autoencoder, data, epochs=20):
                     "kl_loss": kl_loss.item(),
                     "total_loss": loss.item(),
                 })
-                # if b_idx % 10 == 0:
-                #     plt.imshow(x[0].permute(1, 2, 0).cpu().detach().numpy())
-                #     plt.show()
                 loss.backward()
                 opt.step()
             torch.save(autoencoder.state_dict(), f'{CHECKPOINT_DIR}/{epoch}.pth')
@@ -100,7 +102,8 @@ def train(autoencoder, data, epochs=20):
 
 def main():
     file_list = os.listdir(DATA_DIR)
-    dataset = create_dataset(file_list, rollouts=len(file_list))
+    files_taken = 150
+    dataset = create_dataset(file_list[:files_taken], rollouts=files_taken)
     print(f'> Compiled datsaet! {len(dataset)} images')
 
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
