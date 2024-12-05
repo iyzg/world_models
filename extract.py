@@ -14,7 +14,7 @@ DIR_NAME = "rollouts"
 NUM_WORKERS = min(64, cpu_count())
 
 MAX_FRAMES = 1_000
-TOTAL_ROLLOUTS = 10
+TOTAL_ROLLOUTS = 500
 TRIALS_PER_WORKER = TOTAL_ROLLOUTS // NUM_WORKERS + 1
 
 if not os.path.exists(DIR_NAME):
