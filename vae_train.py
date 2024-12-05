@@ -2,9 +2,11 @@ import numpy as np
 import os
 import torch
 
+import matplotlib.pyplot as plt
 from models.vae import VAE
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
+import wandb
 
 
 class ObsDataset(Dataset):
@@ -20,8 +22,8 @@ class ObsDataset(Dataset):
 
 LATENT_DIMS = 32
 BATCH_SIZE = 128
-LR = 3e-4
-N_EPOCHS = 5
+LR = 1e-4
+N_EPOCHS = 10
 DATA_DIR = 'rollouts'
 CHECKPOINT_DIR = 'vae_checkpoints'
 
@@ -35,9 +37,16 @@ device = (
     # else 'mps' if torch.backends.mps.is_available() else 'cpu'
 )
 
+wandb.init(project="world-models", config={
+    "epochs": N_EPOCHS,
+    "learning_rate": LR,
+    "batch_size": BATCH_SIZE,  # Change to your actual batch size
+    "latent_dims": LATENT_DIMS
+})
+
 
 def create_dataset(filelist, rollouts=10_000, steps=1_000):
-    data = np.empty((rollouts*steps, 96, 96, 3), dtype=np.uint8) 
+    data = np.empty((rollouts*steps, 96, 96, 3), dtype=np.float32) 
 
     idx = 0
     for i in tqdm(range(rollouts)):
@@ -67,14 +76,25 @@ def train(autoencoder, data, epochs=20):
                 opt.zero_grad()
                 x_hat = autoencoder(x)
 
-                loss = ((x - x_hat) ** 2).sum() + 1e-3 * autoencoder.encoder.kl
+                recon_loss = ((x - x_hat) ** 2).mean() 
+                # tuning this beta so they're roughly equal losses to begin with?
+                kl_loss = 0.005 * autoencoder.encoder.kl / x.shape[0]
+                loss = recon_loss + kl_loss
                 # print(((x - x_hat) ** 2).sum(), autoencoder.encoder.kl)
                 # print(f'epoch {epoch} | loss {loss:.2f}')
-                t.set_postfix(loss=f'{loss:6.2f}')
-                
+                t.set_postfix(recon_loss=f'{recon_loss:6.4f}', kl_loss=f'{kl_loss:6.4f}')
+                wandb.log({
+                    "recon_loss": recon_loss.item(),
+                    "kl_loss": kl_loss.item(),
+                    "total_loss": loss.item(),
+                })
+                # if b_idx % 10 == 0:
+                #     plt.imshow(x[0].permute(1, 2, 0).cpu().detach().numpy())
+                #     plt.show()
                 loss.backward()
                 opt.step()
             torch.save(autoencoder.state_dict(), f'{CHECKPOINT_DIR}/{epoch}.pth')
+    wandb.finish()
     return autoencoder
 
 
@@ -85,6 +105,27 @@ def main():
 
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
     print('> Created dataloader!')
+    # dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+    # data_iter = iter(dataloader)
+    # images_batch = next(data_iter)
+
+    # print(images_batch.shape)
+    # # Plot the batch of images
+    # fig, axes = plt.subplots(1, len(images_batch), figsize=(15, 5))
+
+    # for i, ax in enumerate(axes):
+    #     im = images_batch[i].numpy()
+    #     print(np.ptp(im))
+    #     print(np.min(im))
+    #     print(np.max(im))
+    #     print(not np.any(im))
+    #     ax.imshow(
+    #         # images_batch[i].permute(1, 2, 0).numpy()
+    #         im
+    #     )  # Convert from (C, H, W) to (H, W, C)
+    #     ax.axis("off")
+
+    # plt.show()
 
     model = VAE(latent_dims=LATENT_DIMS, in_c=3).to(device)
     print(f'> Made model! ({sum(p.numel() for p in model.parameters())} parameters)')

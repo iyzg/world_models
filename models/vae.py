@@ -18,19 +18,19 @@ class VariationalEncoder(nn.Module):
     def __init__(self, latent_dims, in_c):
         super().__init__()
         self.conv_layers = nn.Sequential(
-            nn.Conv2d(in_c, 16, 5, 2),
-            nn.ReLU(),
-            nn.Conv2d(16, 32, 5, 2),
+            nn.Conv2d(in_c, 32, 5, 2),
             nn.ReLU(),
             nn.Conv2d(32, 64, 5, 2),
             nn.ReLU(),
             nn.Conv2d(64, 128, 5, 2),
             nn.ReLU(),
+            nn.Conv2d(128, 256, 5, 2),
+            nn.ReLU(),
         )
 
         # bx96x96x3 -> bx3x3x128
-        self.mu_lin = nn.Linear(3*3*128, latent_dims)
-        self.sigma_lin = nn.Linear(3*3*128, latent_dims)
+        self.mu_lin = nn.Linear(3*3*256, latent_dims)
+        self.sigma_lin = nn.Linear(3*3*256, latent_dims)
 
         self.N = torch.distributions.Normal(0, 1)
         self.kl = 0
@@ -42,9 +42,10 @@ class VariationalEncoder(nn.Module):
         x = torch.flatten(x, start_dim=1)
         # print(f'shape after flatten: {x.shape}')
         mu = self.mu_lin(x)
-        sigma = torch.exp(self.sigma_lin(x))
+        sigma = torch.exp(self.sigma_lin(x) / 2.0)
         z = mu + sigma * self.N.sample(mu.shape)
-        self.kl = (sigma**2 + mu**2 - torch.log(sigma) - 1/2).sum()
+        self.kl = (sigma**2 + mu**2 - torch.log(sigma) - 0.5).sum()
+
         # print(f'after: {z.shape}')
         return z
 
@@ -52,24 +53,23 @@ class VariationalEncoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, latent_dims, in_c):
         super().__init__()
-        self.linear = nn.Linear(latent_dims, 3*3*128)
+        self.linear = nn.Linear(latent_dims, 3*3*256)
         self.conv_layers = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, 5, 2), 
+            nn.ConvTranspose2d(256, 128, 5, 2), 
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 5, 2),
+            nn.ConvTranspose2d(128, 64, 5, 2),
             nn.ReLU(),
-            nn.ConvTranspose2d(32, 16, 6, 2),
+            nn.ConvTranspose2d(64, 32, 6, 2),
             nn.ReLU(),
-            nn.ConvTranspose2d(16, in_c, 6, 2),
+            nn.ConvTranspose2d(32, in_c, 6, 2),
             nn.Sigmoid(),
         )
 
     def forward(self, z):
         # print(f'decoder got: {z.shape}')
         z = self.linear(z)
-        z = F.relu(z)
         # print(f'after linear: {z.shape}')
-        z = z.reshape(-1, 128, 3, 3)
+        z = z.reshape(-1, 256, 3, 3)
         # print(f'after reshape: {z.shape}')
         out = self.conv_layers(z)
         # print(f'after decoder conv: {out.shape}')
