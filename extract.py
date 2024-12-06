@@ -27,7 +27,7 @@ def generate_rollouts(worker_id):
         render_mode="rgb_array",
         lap_complete_percent=0.95,
         domain_randomize=False,
-        continuous=False,
+        continuous=True,
     )
 
     TOTAL_FRAMES = 0
