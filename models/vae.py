@@ -43,14 +43,14 @@ class VariationalEncoder(nn.Module):
             nn.Conv2d(64, 128, 5, 2, bias=False),
             nn.BatchNorm2d(128),
             nn.LeakyReLU(),
-            nn.Conv2d(128, 256, 5, 2, bias=False),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(128, 128, 5, 2, bias=False),
+            nn.BatchNorm2d(128),
             nn.LeakyReLU(),
         )
 
         # bx96x96x3 -> bx3x3x128
-        self.mu_lin = nn.Linear(3 * 3 * 256, latent_dims)
-        self.sigma_lin = nn.Linear(3 * 3 * 256, latent_dims)
+        self.mu_lin = nn.Linear(3 * 3 * 128, latent_dims)
+        self.sigma_lin = nn.Linear(3 * 3 * 128, latent_dims)
 
     def forward(self, x):
         x = self.conv_layers(x)
@@ -63,9 +63,9 @@ class VariationalEncoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, latent_dims, in_c):
         super().__init__()
-        self.linear = nn.Linear(latent_dims, 3 * 3 * 256)
+        self.linear = nn.Linear(latent_dims, 3 * 3 * 128)
         self.conv_layers = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, 5, 2, bias=False),
+            nn.ConvTranspose2d(128, 128, 5, 2, bias=False),
             nn.BatchNorm2d(128),
             nn.LeakyReLU(),
             nn.ConvTranspose2d(128, 64, 5, 2, bias=False),
@@ -82,7 +82,7 @@ class Decoder(nn.Module):
         # print(f'decoder got: {z.shape}')
         z = self.linear(z)
         # print(f'after linear: {z.shape}')
-        z = z.reshape(-1, 256, 3, 3)
+        z = z.reshape(-1, 128, 3, 3)
         # print(f'after reshape: {z.shape}')
         out = self.conv_layers(z)
         # print(f'after decoder conv: {out.shape}')
