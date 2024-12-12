@@ -40,14 +40,14 @@ class LatentSeriesDataset(Dataset):
 
 # MDN-RNN parameters
 RNN_INPUT_SIZE = 32 + 3 # latent_dims + action_size
-RNN_HIDDEN_SIZE = 128
+RNN_HIDDEN_SIZE = 64
 RNN_OUTPUT_SIZE = 32
 N_GAUSSIANS = 5
 N_LAYERS = 1
 
 N_EPISODES = 200
 EPISODE_LENGTH = 1000
-BATCH_SIZE = 256
+BATCH_SIZE = 64
 LR = 1e-3
 N_EPOCHS = 500
 DATA_DIR = 'series'
@@ -79,7 +79,7 @@ wandb.init(
 def train(model, data, epochs=20):
     model.train()
     opt = torch.optim.Adam(model.parameters(), lr=LR)
-    with tqdm(range(epochs)) as t:
+    with tqdm(range(epochs + 1)) as t:
         for epoch in t:
             for _, (x, y) in enumerate(data):
                 x, y = x.to(device), y.to(device)

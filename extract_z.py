@@ -6,13 +6,14 @@ import random
 from models.vae import VAE
 from tqdm import trange
 import torch
+torch.set_grad_enabled(False)
 
 DATA_DIR = "rollouts"
 CHECKPOINTS_DIR = "vae_checkpoints"
 Z_DATA_DIR = "series"
 LATENT_DIMS = 32
 MODEL_CHECKPOINT_NUM = 6
-FILES_TO_USE = 150
+FILES_TO_USE = 200
 BATCH_SIZE = 1_000
 
 

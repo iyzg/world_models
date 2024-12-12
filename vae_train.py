@@ -54,7 +54,6 @@ def create_dataset(filelist, rollouts=10_000, steps=1_000):
     idx = 0
     for i in tqdm(range(rollouts)):
         filename = filelist[i]
-        # obs = np.load(f'{DATA_DIR}/{filename}')['obs']
         obs = np.load(os.path.join(DATA_DIR, filename))["obs"]
         # AHH DONT FORGET TO NORMALIZE
         obs = obs.astype(np.float32) / 255.0
@@ -103,7 +102,7 @@ def train(autoencoder, data, epochs=20):
 
 def main():
     file_list = os.listdir(DATA_DIR)
-    files_taken = 150
+    files_taken = 200
     dataset = create_dataset(file_list[:files_taken], rollouts=files_taken)
     print(f"> Compiled datsaet! {len(dataset)} images")
 
