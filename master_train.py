@@ -9,6 +9,7 @@ import random
 from dataclasses import dataclass
 from multiprocessing import Pool, cpu_count
 
+import fcmaes
 import gymnasium as gym
 import numpy as np
 import torch
@@ -155,27 +156,27 @@ class RNNConfig:
     n_layers: int = 1
     temp: float = 1.0
 
-# TODO: TOTALLY GO THROUGH AND EVICERATE THIS STUFF
+# TODO: Incorporate temp into the MDN model
+# TODO: Clean up all this code
 class MDN(nn.Module):
-    # def __init__(self, input_size, output_size, n_gaussians, temp=1.0):
     def __init__(self, config):
         super().__init__()
-        self.input_size = config.input_size
+        self.input_size = config.output_size
         self.output_size = config.output_size
         self.n_gaussians = config.n_gaussians 
 
-        self.pi_lin = nn.Linear(config.input_size, config.n_gaussians)
-        self.mu_lin = nn.Linear(config.input_size, config.n_gaussians * config.output_size)
-        self.sigma_lin = nn.Linear(config.input_size, config.n_gaussians * config.output_size)
+        self.pi = nn.Linear(self.input_size, self.n_gaussians)
+        self.mu = nn.Linear(self.input_size, self.n_gaussians * self.output_size)
+        self.sigma_lin = nn.Linear(self.input_size, self.n_gaussians * self.output_size)
 
         self.temp = config.temp 
 
     def forward(self, x):
         # Drop down to one timestep at a time
         x = x.squeeze(0)
-        pi = F.softmax(self.pi_lin(x), dim=1)
+        pi = F.softmax(self.pi(x), dim=1)
 
-        mu = self.mu_lin(x)
+        mu = self.mu(x)
         mu = mu.reshape(-1, self.n_gaussians, self.output_size)
 
         sigma = torch.exp(self.sigma_lin(x))
@@ -183,24 +184,13 @@ class MDN(nn.Module):
 
         return pi, mu, sigma
 
-class MDNRNN(nn.Module):
-    def __init__():
-        super().__init__()
-
-    def forward(self, x, h):
-        y, h = self.rnn(x, h)
-        pi, mu, sigma = self.mdn(y)
-        return pi, mu, sigma, h
-
-
     def loss(self, pi, mu, sigma, y):
         n = torch.distributions.Normal(mu, sigma)
         y = y.unsqueeze(1).expand_as(mu)
         logprob = n.log_prob(y)
         logprob = logprob.sum(-1)   # [b, n_gau]
 
-        ## log(a * b) = log(a) + log(b)
-        ## this is a classic trick of using log to turn a product into a sum
+        # log(pi * prob) = log(pi) + log(prob)
         log_pi = torch.log(pi + 1e-6)
         logprob = logprob + log_pi
 
@@ -208,15 +198,14 @@ class MDNRNN(nn.Module):
         return -prob.mean()
 
 class MDNRNN(nn.Module):
-    def __init__(self, n_gaussians, input_size, hidden_size, output_size, layers):
+    def __init__(self, config):
         super().__init__()
-
-        self.layers = layers
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-        self.rnn = nn.LSTM(input_size, hidden_size, layers, batch_first=True, proj_size=output_size)
-        self.mdn = MDN(output_size, output_size, n_gaussians)
+        self.layers = config.n_layers
+        self.input_size = config.input_size
+        self.hidden_size = config.hidden_size
+        self.output_size = config.output_size 
+        self.rnn = nn.LSTM(config.input_size, config.hidden_size, config.n_layers, batch_first=True, proj_size=config.output_size)
+        self.mdn = MDN(config)
 
     def forward(self, x, h):
         y, h = self.rnn(x, h)
@@ -226,6 +215,19 @@ class MDNRNN(nn.Module):
     def initial_state(self, batch_size):
         return (torch.zeros(self.layers, batch_size, self.output_size),
                 torch.zeros(self.layers, batch_size, self.hidden_size))
+
+# --------------------------------------------------------------------
+# Controller
+
+# TODO: Implement controller config class
+
+# TODO: FINISH THIS
+class Controller():
+    def __init__(self, config):
+        return
+
+    def __call__(self, x):
+        return x
 
 # --------------------------------------------------------------------
 # Dataset classes
@@ -257,6 +259,38 @@ class FrameDataset(Dataset):
         array = np.load(self.file_list[file_idx], mmap_mode='r')["obs"]
         return torch.from_numpy(array[frame_idx].copy().astype(np.float32) / 255.0)
 
+class LatentDatset(Dataset):
+    def __init__(self, file_pattern):
+        self.file_list = sorted(glob.glob(file_pattern))
+        self.n_episodes = len(self.file_list)
+
+    def __len__(self):
+        return self.n_episodes
+
+    def __getitem__(self, idx):
+        data = np.load(self.file_list[idx])
+        mu = data["mu"]
+        logvar = data["logvar"]
+        act = data["act"]
+
+        # Sample from the latent
+        std = np.exp(0.5 * logvar)
+        eps = np.random.randn(*mu.shape)
+        z = eps * std + mu
+
+        # Concatenate the latent with the action
+        inputs = np.concatenate((z[:-1], act[:-1]), axis=-1)
+        targets = z[1:]
+        return torch.Tensor(inputs), torch.Tensor(targets)
+
+# ---------------------------------------------------------------------
+# Environment dataclass
+
+@dataclass
+class EnvConfig:
+    input_size: tuple = (96, 96)
+    in_channels: int = 3
+    act_size: int = 3
 
 # ---------------------------------------------------------------------
 # Utils
@@ -276,6 +310,7 @@ def get_device(args):
 
 # ---------------------------------------------------------------------
 # Rollout extraction
+@torch.no_grad()
 def rollout(worker_id, trials, args):
     # TODO: Change env to be instantiated from parameter
     env = gym.make(
@@ -316,6 +351,7 @@ def rollout(worker_id, trials, args):
     env.close()
     return total_frames
 
+@torch.no_grad()
 def generate_rollouts(args):
     print("generating rollouts")
     if not os.path.exists(args.rollout_dir):
@@ -345,6 +381,8 @@ def train_vae(args):
     device = get_device(args)
     model = VAE(config).to(device)
     print(f"made vae ({sum(p.numel() for p in model.parameters())} parameters)")
+    if args.compile:
+        model = torch.compile(model)
 
     # Get all args that start with 'vae_' as a dict
     # Init wandb
@@ -353,7 +391,7 @@ def train_vae(args):
 
     opt = torch.optim.Adam(model.parameters(), lr=args.vae_learning_rate)
     model.train()
-    with tqdm(range(args.vae_epochs)) as t:
+    with tqdm(range(args.vae_epochs + 1)) as t:
         for epoch in t:
             for x in dataloader:
                 x = x.to(device)
@@ -384,14 +422,102 @@ def train_vae(args):
             torch.save(model.state_dict(), f"{args.dir_vae}/{epoch}.pth")
     wandb.finish()
 
+@torch.no_grad()
 def generate_latents(args):
     print("generating latents")
-    return
+    # TODO: load vae more generally
+    # the config should adapt to the args somehow
+    config = VAEConfig()
+    device = get_device(args)
+    model = VAE(config).to(device)
+
+    # load the most recent checkpoint (assuming numbered correctly)
+    checkpoints = sorted(glob.glob(f"{args.dir_vae}/*.pth"))
+    model.load_state_dict(
+        torch.load(
+            checkpoints[-1],
+            weights_only=True,
+        )
+    )
+    model.eval()
+
+    if not os.path.exists(args.dir_latent):
+        os.mkdir(args.dir_latent)
+
+    # loop through rollouts, get obs, get latent, save
+    for file in glob.glob(f"{args.rollout_dir}/*.npz"):
+        data = np.load(file)
+        obs = data["obs"]
+        act = data["act"]
+
+        # AHH DONT FORGET TO NORMALIZE
+        obs = obs.astype(np.float32) / 255.0
+        mu, logvar = model.encode(
+            torch.tensor(obs, dtype=torch.float32).permute(0, 3, 1, 2).to(device)
+        )
+
+        # Save to .npz file
+        latent_file = f"{args.dir_latent}/{file.split('/')[-1]}"
+        np.savez_compressed(latent_file, mu=mu.cpu().numpy(), logvar=logvar.cpu().numpy(), act=act)
 
 def train_rnn(args):
     print("training rnn")
-    return
+    if not os.path.exists(args.dir_rnn):
+        os.mkdir(args.dir_rnn)
 
+    dataset = LatentDatset(f"{args.dir_latent}/*.npz")
+    print(f"compiled rnn dataset ({len(dataset)} episodes)")
+
+    workers = min(cpu_count(), args.n_workers)
+    dataloader = DataLoader(dataset, batch_size=args.rnn_batch_size, shuffle=True, num_workers=workers)
+    print("created dataloader")
+
+    # TODO: Figure out way to actually use config
+    config = RNNConfig()
+    device = get_device(args)
+    if device == "mps":
+        print("Warning: MPS is not supported for LSTM training, defaulting to CPU")
+        device = "cpu"
+    model = MDNRNN(config).to(device)
+
+    rnn_args = {k.replace('rnn_', ''): v for k, v in vars(args).items() if k.startswith('rnn_')}
+    wandb.init(project="world-models", config=rnn_args, name=f"rnn_{wandb.util.generate_id()}")
+
+    opt = torch.optim.Adam(model.parameters(), lr=args.rnn_learning_rate)
+    model.train()
+    with tqdm(range(args.rnn_epochs + 1)) as t:
+        for epoch in t:
+            for (x, y) in dataloader:
+                x, y = x.to(device), y.to(device)
+                h = model.initial_state(x.size(0))
+
+                opt.zero_grad()
+                loss = 0.0
+                for ts in range(x.size(1)):
+                    pi, mu, sigma, h = model(x[:, ts].unsqueeze(1), h)
+                    step_loss = model.mdn.loss(pi, mu, sigma, y[:, ts])
+                    loss += step_loss
+
+                # Average loss over timesteps
+                loss /= x.size(1)
+
+                t.set_postfix(
+                    loss = f"{loss:6.4f}",
+                )
+                wandb.log(
+                    {
+                        "loss": loss.item()
+                    }
+                )
+                loss.backward()
+                opt.step()
+
+            # TODO: Add command for how often to save model
+            if epoch % 50 == 0:
+                torch.save(model.state_dict(), f"{args.dir_rnn}/{epoch}.pth")
+    wandb.finish()
+
+@torch.no_grad()
 def train_controller(args):
     print("training controller")
     return
@@ -416,21 +542,30 @@ if __name__ == '__main__':
     parser.add_argument("--n-rollouts", type=int, default=10_000, help="number of rollouts to extract")
     parser.add_argument("--max-frames", type=int, default=1000, help="maximum number of frames per rollout")
     # phase 2. train VAE
+    # TODO: add thing for kernel sizes and stride
     parser.add_argument("--dir-vae", type=str, default="vae_checkpoints", help="directory to save VAE checkpoints")
-    parser.add_argument("--vae-epochs", type=int, default=5, help="number of epochs to train the VAE")
     parser.add_argument("--vae-latent-dims", type=int, default=32, help="dimensionality of the latent space")
+
+    parser.add_argument("--vae-epochs", type=int, default=5, help="number of epochs to train the VAE")
     parser.add_argument("--vae-batch-size", type=int, default=128, help="batch size for training")
     parser.add_argument("--vae-learning-rate", type=float, default=1e-4, help="learning rate for training")
     parser.add_argument("--vae-kl-weight", type=float, default=0.00001, help="weight for KL divergence loss term")
     # phase 3. extract latent space dataset
-    # TODO: Add arguments for this phase
+    parser.add_argument("--dir-latent", type=str, default="series", help="directory to save latent space dataset")
     # phase 4. train RNN
-    parser.add_argument("--rnn-dir", type=str, default="rnn_checkpoints", help="directory to save RNN checkpoints")
-    parser.add_argument("--rnn-epochs", type=int, default=100, help="number of epochs to train the VAE")
+    parser.add_argument("--dir-rnn", type=str, default="rnn_checkpoints", help="directory to save RNN checkpoints")
     parser.add_argument("--rnn-hidden-size", type=int, default=128, help="dimensionality of the hidden state")
+    parser.add_argument("--rnn-n-gaussians", type=int, default=5, help="number of gaussians for the MDN")
+    parser.add_argument("--rnn-layers", type=int, default=1, help="number of layers in the RNN")
+    parser.add_argument("--rnn-temp", type=float, default=1.0, help="temperature for the MDN")
 
+    parser.add_argument("--rnn-epochs", type=int, default=100, help="number of epochs to train the VAE")
+    parser.add_argument("--rnn-batch-size", type=int, default=32, help="batch size for training")
+    parser.add_argument("--rnn-learning-rate", type=float, default=1e-3, help="learning rate for training")
     # phase 5. train controller
-    # TODO: Add arguments here
+    parser.add_argument("--dir-controller", type=str, default="controller_checkpoints", help="directory to save controller checkpoints")
+    parser.add_argument("--controller-pop-size", type=int, default=64, help="population size for controller training")
+    parser.add_argument("--controller-evals-per-agent", type=int, default=8, help="number of evaluations per agent")
     
     args = parser.parse_args()
 
