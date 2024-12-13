@@ -234,30 +234,28 @@ class Controller():
 
 class FrameDataset(Dataset):
     def __init__(self, file_pattern):
-        self.file_list = sorted(glob.glob(file_pattern))
+        files = sorted(glob.glob(file_pattern))
         # Store mapping from flat index to (file_idx, frame_idx)
-        self.file_sizes = []  # Size of each file in frames
-        self.cumulative_sizes = [0]  # Cumulative sum of frames
+        sample = np.load(files[0])["obs"]
+        self.total_frames = 0
+        for file in files:
+            self.total_frames += len(np.load(file)["obs"])
         
-        for file in self.file_list:
-            # Just read the header to get array size
-            array = np.load(file, mmap_mode="r")["obs"]
-            # Assuming shape is (num_frames, frame_height, frame_width, channels)
-            num_frames = array.shape[0]
-            self.file_sizes.append(num_frames)
-            self.cumulative_sizes.append(self.cumulative_sizes[-1] + num_frames)
+        # Create the combined array
+        self.all_frames = np.empty((self.total_frames, *sample.shape[1:]), dtype=np.uint8)
+        
+        current_idx = 0
+        for file in files:
+            frames = np.load(file)["obs"]
+            length = len(frames)
+            self.all_frames[current_idx:current_idx + length] = frames
+            current_idx += length
 
     def __len__(self):
-        return self.cumulative_sizes[-1]  # Total number of frames
+        return self.total_frames
         
     def __getitem__(self, idx):
-        # Binary search to find which file contains this frame
-        file_idx = bisect.bisect_right(self.cumulative_sizes, idx) - 1
-        frame_idx = idx - self.cumulative_sizes[file_idx]
-        
-        # Memory map the file and get the specific frame
-        array = np.load(self.file_list[file_idx], mmap_mode='r')["obs"]
-        return torch.from_numpy(array[frame_idx].copy().astype(np.float32) / 255.0)
+        return torch.from_numpy(self.all_frames[idx].copy().astype(np.float32) / 255.0)
 
 class LatentDatset(Dataset):
     def __init__(self, file_pattern):
