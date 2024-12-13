@@ -20,10 +20,10 @@ DIR_NAME = "rollouts"
 NUM_WORKERS = min(64, cpu_count())
 
 MAX_FRAMES = 1_000
-TOTAL_ROLLOUTS = 200
+TOTAL_ROLLOUTS = 9_500
 TRIALS_PER_WORKER = TOTAL_ROLLOUTS // NUM_WORKERS + 1
 
-USE_AGENT = True
+USE_AGENT = False
 
 #### USE AGENT PARAMETERS ####
 
@@ -83,7 +83,8 @@ def generate_rollouts(worker_id):
         filename = f'{DIR_NAME}/{worker_id}_{seed}.npz'
         obs_l = []
         act_l = []
-        h = rnn.initial_state(1)
+        if USE_AGENT:
+            h = rnn.initial_state(1)
 
         # NOTE: obs is 96x96
         obs, info = env.reset(seed=seed)
