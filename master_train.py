@@ -8,8 +8,9 @@ import os
 import random
 from dataclasses import dataclass
 from multiprocessing import Pool, cpu_count
+from pathlib import Path
 
-import fcmaes
+import cma
 import gymnasium as gym
 import numpy as np
 import torch
@@ -18,6 +19,8 @@ import torch.nn.functional as F
 import wandb
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
+
+torch.set_float32_matmul_precision('high')
 
 # --------------------------------------------------------------------
 # VAE building blocks
@@ -219,67 +222,115 @@ class MDNRNN(nn.Module):
 # --------------------------------------------------------------------
 # Controller
 
-# TODO: Implement controller config class
+# Implement controller config class
+@dataclass
+class ControllerConfig:
+    input_size: int = 32 + 3
+    act_size: int = 3
 
-# TODO: FINISH THIS
 class Controller():
-    def __init__(self, config):
-        return
+    def __init__(self, data, config):
+        self.input_size = config.input_size
+        self.act_size = config.act_size
+        self.w = data[:self.input_size * self.act_size].reshape(self.input_size, self.act_size)
+        self.b = data[self.input_size * self.act_size:]
 
     def __call__(self, x):
-        return x
+        x = np.dot(x, self.w) + self.b
+        x = np.nan_to_num(x, nan=0.0)
+
+        # Ensure it gives right output range
+        x[0] = np.tanh(x[0])
+        x[1] = self._sigmoid(x[1])
+        x[2] = self._sigmoid(x[2])
+
+        return x 
+
+    def _sigmoid(self, x):
+        return np.clip(0.5 * (1 + np.tanh(x / 2)), 0, 1)
 
 # --------------------------------------------------------------------
 # Dataset classes
 
+def count_frames(filename):
+    return len(np.load(filename)["obs"])
+
 class FrameDataset(Dataset):
     def __init__(self, file_pattern):
+        # TODO: Add preprocessed path to args
+        self.preprocessed_path = Path("rollouts.npy")
+        if self.preprocessed_path.exists():
+            print(f"Loading preprocessed data from {self.preprocessed_path}")
+            self.data = np.load(self.preprocessed_path)
+            self.total_frames = len(self.data)
+            self.data = torch.from_numpy(self.data)
+            return
+
         files = sorted(glob.glob(file_pattern))
-        # Store mapping from flat index to (file_idx, frame_idx)
+
+        with Pool() as pool:
+            frame_counts = list(pool.map(count_frames, files))
+
+        self.total_frames = sum(frame_counts)
+        
+        # Pre-allocate array with proper type
         sample = np.load(files[0])["obs"]
-        self.total_frames = 0
-        for file in files:
-            self.total_frames += len(np.load(file)["obs"])
-        
-        # Create the combined array
-        self.all_frames = np.empty((self.total_frames, *sample.shape[1:]), dtype=np.uint8)
-        
+        self.data = np.empty((self.total_frames, *sample.shape[1:]), dtype=np.float32)
+            
         current_idx = 0
         for file in files:
-            frames = np.load(file)["obs"]
+            frames = np.load(file)["obs"].astype(np.float32) / 255.0
             length = len(frames)
-            self.all_frames[current_idx:current_idx + length] = frames
+            self.data[current_idx:current_idx + length] = frames
             current_idx += length
+
+        # Save the preprocessed data
+        print(f"Saving preprocessed data to {self.preprocessed_path}")
+        np.save(self.preprocessed_path, self.data)
+        self.data = torch.from_numpy(self.data)
 
     def __len__(self):
         return self.total_frames
         
     def __getitem__(self, idx):
-        return torch.from_numpy(self.all_frames[idx].copy().astype(np.float32) / 255.0)
+        return self.data[idx]
 
 class LatentDatset(Dataset):
     def __init__(self, file_pattern):
         self.file_list = sorted(glob.glob(file_pattern))
         self.n_episodes = len(self.file_list)
 
+        # Load one file to get dimensions
+        sample_data = np.load(self.file_list[0])
+        latent_dim = sample_data["mu"].shape[1]
+        action_dim = sample_data["act"].shape[1]
+        seq_length = sample_data["mu"].shape[0]
+        n_episodes = len(self.file_list)
+
+        # Pre-allocate tensors
+        self.mus = torch.empty(n_episodes, seq_length, latent_dim)
+        self.logvars = torch.empty(n_episodes, seq_length, latent_dim)
+        self.actions = torch.empty(n_episodes, seq_length, action_dim)
+        
+        # Load all data
+        for idx, file in enumerate(tqdm(self.file_list)):
+            data = np.load(file)
+            self.mus[idx] = torch.from_numpy(data["mu"])
+            self.logvars[idx] = torch.from_numpy(data["logvar"])
+            self.actions[idx] = torch.from_numpy(data["act"])
+        
+        self.stds = torch.exp(0.5 * self.logvars)
+
     def __len__(self):
         return self.n_episodes
 
     def __getitem__(self, idx):
-        data = np.load(self.file_list[idx])
-        mu = data["mu"]
-        logvar = data["logvar"]
-        act = data["act"]
-
-        # Sample from the latent
-        std = np.exp(0.5 * logvar)
-        eps = np.random.randn(*mu.shape)
-        z = eps * std + mu
-
-        # Concatenate the latent with the action
-        inputs = np.concatenate((z[:-1], act[:-1]), axis=-1)
-        targets = z[1:]
-        return torch.Tensor(inputs), torch.Tensor(targets)
+        # Sample from the latent distribution during access
+        z = self.mus[idx] + self.stds[idx] * torch.randn_like(self.stds[idx])
+        
+        inputs = torch.cat((z[:-1], self.actions[idx][:-1]), dim=-1)
+        
+        return inputs, z[1:]
 
 # ---------------------------------------------------------------------
 # Environment dataclass
@@ -429,6 +480,8 @@ def generate_latents(args):
     device = get_device(args)
     model = VAE(config).to(device)
 
+    if args.compile:
+        model = torch.compile(model)
     # load the most recent checkpoint (assuming numbered correctly)
     checkpoints = sorted(glob.glob(f"{args.dir_vae}/*.pth"))
     model.load_state_dict(
@@ -477,6 +530,8 @@ def train_rnn(args):
         print("Warning: MPS is not supported for LSTM training, defaulting to CPU")
         device = "cpu"
     model = MDNRNN(config).to(device)
+    if args.compile:
+        model = torch.compile(model)
 
     rnn_args = {k.replace('rnn_', ''): v for k, v in vars(args).items() if k.startswith('rnn_')}
     wandb.init(project="world-models", config=rnn_args, name=f"rnn_{wandb.util.generate_id()}")
@@ -516,9 +571,107 @@ def train_rnn(args):
     wandb.finish()
 
 @torch.no_grad()
+def rollout(solution, args):
+    device = get_device(args)
+    if device == "mps":
+        print("Warning: MPS is not supported for LSTM training, defaulting to CPU")
+        device = "cpu"
+
+    vae = VAE(VAEConfig()).to(device)
+    rnn = MDNRNN(RNNConfig()).to(device)
+    c_config = ControllerConfig(input_size = args.rnn_hidden_size + args.vae_latent_dims)
+    controller = Controller(solution, c_config)
+
+    if args.compile:
+        vae = torch.compile(vae)
+        rnn = torch.compile(rnn)
+
+    # load the most recent checkpoint (assuming numbered correctly)
+    # TODO: Rewrite this into the class
+    checkpoints = sorted(glob.glob(f"{args.dir_vae}/*.pth"))
+    vae.load_state_dict(
+        torch.load(
+            checkpoints[-1],
+            weights_only=True,
+        )
+    )
+    vae.eval()
+    checkpoints = sorted(glob.glob(f"{args.dir_rnn}/*.pth"))
+    rnn.load_state_dict(
+        torch.load(
+            checkpoints[-1],
+            weights_only=True,
+        )
+    )
+    rnn.eval()
+
+    rewards = []
+    for _ in range(args.controller_evals_per_agent):
+        env = gym.make(
+            "CarRacing-v3",
+            render_mode="rgb_array",
+            lap_complete_percent=0.95,
+            domain_randomize=False,
+            continuous=True,
+        )
+
+        obs, _ = env.reset()
+        h = rnn.initial_state(1)
+        h = (h[0].to(device), h[1].to(device))
+        done = False
+        cumulative_reward = 0
+        while not done:
+            frame = torch.tensor(obs, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0)
+            frame = frame.to(device)
+            mu, logvar = vae.encode(frame)
+            z = vae.reparamterize(mu, logvar)
+            c_in = torch.cat([z.flatten(), h[1].flatten()], dim=-1).cpu().numpy()
+            a = controller(c_in)
+            obs, reward, terminated, truncated, _ = env.step(a)
+            if terminated or truncated:
+                break
+            cumulative_reward += reward
+            a = torch.tensor(a, dtype=torch.float32, device=device)
+            _, _, _, h = rnn(torch.cat([z.flatten(), a], dim=-1).unsqueeze(0).unsqueeze(0), h)
+            # h = (h[0].to(device), h[1].to(device))
+        rewards.append(cumulative_reward)
+        env.close()
+    print('Evaled agent with reward:', cumulative_reward)
+    avg_reward = sum(rewards) / len(rewards)
+    return -avg_reward  # Negative since CMA minimizes
+
+@torch.no_grad()
 def train_controller(args):
     print("training controller")
-    return
+    if not os.path.exists(args.dir_controller):
+        os.mkdir(args.dir_controller)
+
+    best_reward = float('-inf')
+    best_solution = None
+
+    workers = min(cpu_count(), args.n_workers)
+    es = cma.CMAEvolutionStrategy((c_config.input_size * c_config.act_size + c_config.act_size) * [0], 0.5)
+    while not es.stop():
+        solutions = es.ask()
+        with Pool(workers) as pool:
+            rewards = pool.starmap(rollout, [(s, args) for s in solutions])
+
+        # Find best solution in this generation
+        min_idx = np.argmin(rewards)  # Using min since rewards are negative
+        gen_best_reward = -rewards[min_idx]  # Convert back to positive
+        gen_best_solution = solutions[min_idx]
+        
+        # Update overall best if we found a better solution
+        if gen_best_reward > best_reward:
+            best_reward = gen_best_reward
+            best_solution = gen_best_solution
+            # Save the best solution to disk
+            np.save(f'{args.dir_controller}/best_controller.npy', best_solution)
+            print('New best solution found with reward:', best_reward)
+            
+        es.tell(solutions, rewards)
+        es.logger.add()
+        es.disp()
 
 # --------------------------------------------------------------------
 # Main loop 
@@ -537,7 +690,7 @@ if __name__ == '__main__':
     # phase 1. extract rollouts
     parser.add_argument("--rollout-dir", type=str, default="rollouts", help="directory to save rollouts")
     parser.add_argument("--n-workers", type=int, default=64, help="number of workers to use for rollouts and loading")
-    parser.add_argument("--n-rollouts", type=int, default=10_000, help="number of rollouts to extract")
+    parser.add_argument("--n-rollouts", type=int, default=5_000, help="number of rollouts to extract")
     parser.add_argument("--max-frames", type=int, default=1000, help="maximum number of frames per rollout")
     # phase 2. train VAE
     # TODO: add thing for kernel sizes and stride
@@ -546,7 +699,7 @@ if __name__ == '__main__':
 
     parser.add_argument("--vae-epochs", type=int, default=5, help="number of epochs to train the VAE")
     parser.add_argument("--vae-batch-size", type=int, default=128, help="batch size for training")
-    parser.add_argument("--vae-learning-rate", type=float, default=1e-4, help="learning rate for training")
+    parser.add_argument("--vae-learning-rate", type=float, default=0.0001, help="learning rate for training")
     parser.add_argument("--vae-kl-weight", type=float, default=0.00001, help="weight for KL divergence loss term")
     # phase 3. extract latent space dataset
     parser.add_argument("--dir-latent", type=str, default="series", help="directory to save latent space dataset")
@@ -570,7 +723,9 @@ if __name__ == '__main__':
     # Do asserts
     print(f"using device: {get_device(args)}")
     assert args.env == "racing", "only racing is supported for now"
+
     # TODO: Actually use env for configs
+    # IDEA: Create config here and then pass it into functions that need it
 
     'rollout' in args.phases and generate_rollouts(args)
     'vae' in args.phases and train_vae(args)
