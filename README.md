@@ -1,17 +1,11 @@
 # World Models
 
-A personal implementation of David Ha's [world model](https://worldmodels.github.io/) architecture!
+A personal one-file implementation of David Ha's [world model](https://worldmodels.github.io/) architecture! You can train the whole pipeline through:
 
-When I clean up the code, I'll add command line options. Right now, rollouts should go to `/rollouts` and VAE checkpoints go to `/vae_checkpoints`.
+`python master_train.py --phases rollout vae latent rnn controller`
 
-## Order of commands
+If you only want to train part of it, call the respective phase. Currently working on making this code generic and able to work on any environment. All the other files were porting over from the original code, but they will all be wiped once I'm happy with the main training code.
 
-`python extract.py`
+![VAE Demo](assets/vae.png)
 
-`python vae_train.py`
-
-`python extract_z.py`
-
-`python rnn_train.py`
-
-`python agent_train.py`
+Currently working on getting the credits to do a full run and ensure the code all works. I've trained a small model on my own laptop to middling results.
