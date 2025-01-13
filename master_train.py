@@ -207,7 +207,6 @@ class RNNConfig:
 
 
 # TODO: Incorporate temp into the MDN model
-# TODO: Clean up all this code
 class MDN(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -291,6 +290,7 @@ class ControllerConfig:
         self.act_size = args.n_actions
 
 
+# TODO: Make this more general? Don't hardcode what activation function is on each output
 class Controller:
     def __init__(self, data, config):
         self.input_size = config.input_size
